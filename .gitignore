@@ -34,3 +34,8 @@ yarn-error.log*
 # typescript
 *.tsbuildinfo
 next-env.d.ts
+
+# non-code docs and deployment-unneeded files
+/*.md
+!/README.md
+/logoduolai.png

@@ -1,4 +1,5 @@
 import useSWR from 'swr';
+import { useMemo } from 'react';
 
 // Type definitions for Polymarket API response
 interface PolymarketTrade {
@@ -35,6 +36,12 @@ export interface WhaleTrade {
   time: string;
   timeAgo: string;
   makerAddress: string;
+  category?: string; // Market category
+  slug: string; // For category lookup
+  eventSlug: string; // For category lookup
+  conditionId: string; // For category lookup
+  timestamp: number; // Unix timestamp for filtering
+  platform: 'polymarket' | 'kalshi'; // Platform identifier
 }
 
 const API_URL = 'https://data-api.polymarket.com/trades?limit=200';
@@ -67,40 +74,48 @@ export const useWhaleTrades = (threshold: number = 1000) => {
     }
   );
 
-  if (isLoading || !data) {
-    return { trades: [], loading: true, error: null };
-  }
+  // Memoize the whale trades to prevent unnecessary re-renders
+  const whaleTrades = useMemo(() => {
+    if (isLoading || !data) {
+      return [];
+    }
 
-  if (error) {
-    return { trades: [], loading: false, error };
-  }
+    if (error) {
+      return [];
+    }
 
-  // Filter and transform trades
-  const trades = Array.isArray(data) ? data : [];
+    // Filter and transform trades
+    const trades = Array.isArray(data) ? data : [];
 
-  const whaleTrades: WhaleTrade[] = trades
-    .map((trade) => {
-      // Calculate USD amount: size * price
-      const amount = trade.size * trade.price;
+    return trades
+      .map((trade) => {
+        // Calculate USD amount: size * price
+        const amount = trade.size * trade.price;
 
-      return {
-        id: trade.transactionHash || `${trade.timestamp}-${trade.asset}`,
-        market: trade.title || 'Unknown Market',
-        outcome: trade.outcome || 'Unknown',
-        amount: amount,
-        side: trade.side,
-        time: new Date(trade.timestamp * 1000).toISOString(),
-        timeAgo: getTimeAgo(trade.timestamp),
-        makerAddress: trade.proxyWallet,
-      };
-    })
-    .filter((trade) => trade.amount >= threshold)
-    .slice(0, 50); // Limit to 50 most recent trades
+        return {
+          id: trade.transactionHash || `${trade.timestamp}-${trade.asset}`,
+          market: trade.title || 'Unknown Market',
+          outcome: trade.outcome || 'Unknown',
+          amount: amount,
+          side: trade.side,
+          time: new Date(trade.timestamp * 1000).toISOString(),
+          timeAgo: getTimeAgo(trade.timestamp),
+          makerAddress: trade.proxyWallet,
+          slug: trade.slug,
+          eventSlug: trade.eventSlug,
+          conditionId: trade.conditionId,
+          timestamp: trade.timestamp,
+          platform: 'polymarket' as const,
+        };
+      })
+      .filter((trade) => trade.amount >= threshold)
+      .slice(0, 50); // Limit to 50 most recent trades
+  }, [data, threshold, isLoading, error]);
 
   return {
     trades: whaleTrades,
-    loading: false,
-    error: null,
+    loading: isLoading || !data,
+    error: error || null,
   };
 };
 

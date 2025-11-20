@@ -1,44 +1,123 @@
 'use client';
 
-import { useState, useEffect, useRef } from 'react';
+import { useState, useEffect, useRef, useMemo } from 'react';
 import { useWhaleTrades, WhaleTrade } from '@/hooks/useWhaleTrades';
+import { useKalshiTrades } from '@/hooks/useKalshiTrades';
+import { useMarketCategories, POPULAR_CATEGORIES } from '@/hooks/useMarketCategories';
 import TradeTable from '@/components/TradeTable';
+import MarketSentiment from '@/components/MarketSentiment';
+
+type Platform = 'polymarket' | 'kalshi';
 
 export default function Home() {
   const [threshold, setThreshold] = useState(1000);
   const [currentPage, setCurrentPage] = useState(1);
   const [countdown, setCountdown] = useState(30);
-  const [accumulatedTrades, setAccumulatedTrades] = useState<WhaleTrade[]>([]);
+  const [platform, setPlatform] = useState<Platform>('polymarket');
+
+  // State for trades
+  const [polymarketTrades, setPolymarketTrades] = useState<WhaleTrade[]>([]);
+  const [kalshiTrades, setKalshiTrades] = useState<WhaleTrade[]>([]);
+
+  const [selectedCategory, setSelectedCategory] = useState<string>('All');
+  const [selectedTimeRange, setSelectedTimeRange] = useState<string>('all');
   const lastFetchTime = useRef<number>(Date.now());
 
-  const { trades, loading, error } = useWhaleTrades(threshold);
+  // Fetch trades from both platforms
+  const polymarketData = useWhaleTrades(threshold);
+  const kalshiData = useKalshiTrades(threshold);
 
-  // Accumulate trades when new data arrives
+  const { getCategory } = useMarketCategories();
+
+  // Get current data based on selected platform
+  const accumulatedTrades = platform === 'polymarket' ? polymarketTrades : kalshiTrades;
+  const currentData = platform === 'polymarket' ? polymarketData : kalshiData;
+  const { trades, loading, error } = currentData;
+
+  // Load data from localStorage on mount
   useEffect(() => {
-    if (trades.length > 0) {
-      setAccumulatedTrades((prev) => {
-        // Create a map of existing trades by ID for quick lookup
+    try {
+      const savedPolymarket = localStorage.getItem('polymarket_trades');
+      const savedKalshi = localStorage.getItem('kalshi_trades');
+
+      if (savedPolymarket) {
+        setPolymarketTrades(JSON.parse(savedPolymarket));
+      }
+      if (savedKalshi) {
+        setKalshiTrades(JSON.parse(savedKalshi));
+      }
+    } catch (error) {
+      console.error('Error loading trades from localStorage:', error);
+    }
+  }, []);
+
+  // Enrich Polymarket trades with categories
+  const enrichedPolymarketTrades = useMemo(() => {
+    return polymarketData.trades.map((trade) => ({
+      ...trade,
+      category: getCategory(trade.market),
+    }));
+  }, [polymarketData.trades, getCategory]);
+
+
+  // Accumulate Polymarket trades
+  useEffect(() => {
+    if (enrichedPolymarketTrades.length > 0) {
+      setPolymarketTrades((prev) => {
         const existingIds = new Set(prev.map((t) => t.id));
-
-        // Add only new trades that don't exist
-        const newTrades = trades.filter((t) => !existingIds.has(t.id));
-
-        // Combine and sort by time (newest first)
+        const newTrades = enrichedPolymarketTrades.filter((t) => !existingIds.has(t.id));
         const combined = [...newTrades, ...prev];
-
-        // Remove duplicates and sort
         const uniqueTrades = Array.from(
           new Map(combined.map((t) => [t.id, t])).values()
         ).sort((a, b) => new Date(b.time).getTime() - new Date(a.time).getTime());
+
+        // Save to localStorage
+        try {
+          localStorage.setItem('polymarket_trades', JSON.stringify(uniqueTrades));
+        } catch (error) {
+          console.error('Error saving Polymarket trades:', error);
+        }
 
         return uniqueTrades;
       });
 
       // Reset countdown when new data arrives
-      lastFetchTime.current = Date.now();
-      setCountdown(30);
+      if (platform === 'polymarket') {
+        lastFetchTime.current = Date.now();
+        setCountdown(30);
+      }
     }
-  }, [trades]);
+  }, [enrichedPolymarketTrades, platform]);
+
+  // Accumulate Kalshi trades
+  useEffect(() => {
+    if (kalshiData.trades.length > 0) {
+      setKalshiTrades((prev) => {
+        const existingIds = new Set(prev.map((t) => t.id));
+        const newTrades = kalshiData.trades.filter((t) => !existingIds.has(t.id));
+        const combined = [...newTrades, ...prev];
+        const uniqueTrades = Array.from(
+          new Map(combined.map((t) => [t.id, t])).values()
+        ).sort((a, b) => new Date(b.time).getTime() - new Date(a.time).getTime());
+
+        // Save to localStorage
+        try {
+          localStorage.setItem('kalshi_trades', JSON.stringify(uniqueTrades));
+        } catch (error) {
+          console.error('Error saving Kalshi trades:', error);
+        }
+
+        return uniqueTrades;
+      });
+
+      // Reset countdown when new data arrives
+      if (platform === 'kalshi') {
+        lastFetchTime.current = Date.now();
+        setCountdown(30);
+      }
+    }
+  }, [kalshiData.trades, platform]);
+
 
   // Countdown timer
   useEffect(() => {
@@ -51,11 +130,15 @@ export default function Home() {
     return () => clearInterval(interval);
   }, []);
 
-  // Reset accumulated trades when threshold changes
+  // Reset to page 1 when threshold changes
   useEffect(() => {
-    setAccumulatedTrades([]);
     setCurrentPage(1);
   }, [threshold]);
+
+  // Reset to page 1 when filters or platform change
+  useEffect(() => {
+    setCurrentPage(1);
+  }, [selectedCategory, selectedTimeRange, platform]);
 
   const thresholdOptions = [
     { label: '$500+', value: 500 },
@@ -64,12 +147,54 @@ export default function Home() {
     { label: '$10,000+', value: 10000 },
   ];
 
+  const timeRangeOptions = [
+    { label: '全部时间', value: 'all' },
+    { label: '最近1小时', value: '1h' },
+    { label: '最近24小时', value: '24h' },
+    { label: '最近7天', value: '7d' },
+  ];
+
+  // Filter trades by threshold, category and time range
+  const filteredTrades = useMemo(() => {
+    let filtered = accumulatedTrades;
+
+    // Filter by threshold (minimum trade amount)
+    filtered = filtered.filter((trade) => trade.amount >= threshold);
+
+    // Filter by category
+    if (selectedCategory !== 'All') {
+      filtered = filtered.filter((trade) => trade.category === selectedCategory);
+    }
+
+    // Filter by time range
+    if (selectedTimeRange !== 'all') {
+      const now = Math.floor(Date.now() / 1000);
+      let timeThreshold = 0;
+
+      switch (selectedTimeRange) {
+        case '1h':
+          timeThreshold = now - 3600;
+          break;
+        case '24h':
+          timeThreshold = now - 86400;
+          break;
+        case '7d':
+          timeThreshold = now - 604800;
+          break;
+      }
+
+      filtered = filtered.filter((trade) => trade.timestamp >= timeThreshold);
+    }
+
+    return filtered;
+  }, [accumulatedTrades, selectedCategory, selectedTimeRange, threshold]);
+
   // Pagination logic
   const itemsPerPage = 20;
-  const totalPages = Math.ceil(accumulatedTrades.length / itemsPerPage);
+  const totalPages = Math.ceil(filteredTrades.length / itemsPerPage);
   const startIndex = (currentPage - 1) * itemsPerPage;
   const endIndex = startIndex + itemsPerPage;
-  const currentTrades = accumulatedTrades.slice(startIndex, endIndex);
+  const currentTrades = filteredTrades.slice(startIndex, endIndex);
 
   const handlePageChange = (page: number) => {
     setCurrentPage(page);
@@ -118,29 +243,119 @@ export default function Home() {
               <span>PolyWhale</span>
             </h1>
             <p className="text-gray-300 text-lg">
-              Real-time Polymarket Whale Trade Alert
+              实时监控 {platform === 'polymarket' ? 'Polymarket' : 'Kalshi'} 巨鲸交易
             </p>
             <p className="text-gray-400 text-sm mt-2">
-              Monitoring large trades on prediction markets • Updates every 30 seconds
+              追踪预测市场大额交易 • 每30秒自动更新
             </p>
+          </div>
+        </div>
+
+        {/* Platform Selector */}
+        <div className="bg-gray-800 rounded-lg shadow-xl p-6 mb-6">
+          <label className="text-gray-300 font-medium block mb-3 text-center">
+            选择平台：
+          </label>
+          <div className="flex items-center justify-center gap-4">
+            <button
+              onClick={() => setPlatform('polymarket')}
+              className={`flex-1 max-w-xs px-8 py-6 rounded-2xl font-bold text-xl transition-all transform hover:scale-105 ${
+                platform === 'polymarket'
+                  ? 'bg-gradient-to-r from-blue-500 to-blue-600 text-white shadow-2xl scale-105 border-4 border-white'
+                  : 'bg-gray-700 text-gray-300 hover:bg-gray-600'
+              }`}
+            >
+              <div className="flex items-center justify-center gap-3">
+                <img
+                  src="/polymarket.jpg"
+                  alt="Polymarket"
+                  className="w-10 h-10 rounded-lg object-cover"
+                />
+                <span>Polymarket</span>
+              </div>
+            </button>
+            <button
+              onClick={() => setPlatform('kalshi')}
+              className={`flex-1 max-w-xs px-8 py-6 rounded-2xl font-bold text-xl transition-all transform hover:scale-105 ${
+                platform === 'kalshi'
+                  ? 'bg-gradient-to-r from-purple-500 to-purple-600 text-white shadow-2xl scale-105 border-4 border-white'
+                  : 'bg-gray-700 text-gray-300 hover:bg-gray-600'
+              }`}
+            >
+              <div className="flex items-center justify-center gap-3">
+                <img
+                  src="/kalshi.jpg"
+                  alt="Kalshi"
+                  className="w-10 h-10 rounded-lg object-cover"
+                />
+                <span>Kalshi</span>
+              </div>
+            </button>
           </div>
         </div>
 
         {/* Filters */}
         <div className="bg-gray-800 rounded-lg shadow-xl p-6 mb-6">
-          <div className="flex flex-wrap items-center justify-between gap-4">
-            <div className="flex items-center gap-4">
-              <label className="text-gray-300 font-medium">
-                Minimum Trade Size:
+          {/* Trade Size Filter */}
+          <div className="mb-4 pb-4 border-b border-gray-700">
+            <label className="text-gray-300 font-medium block mb-3">
+              最小交易金额：
+            </label>
+            <div className="flex flex-wrap gap-2">
+              {thresholdOptions.map((option) => (
+                <button
+                  key={option.value}
+                  onClick={() => setThreshold(option.value)}
+                  className={`px-4 py-2 rounded-lg font-medium transition-all ${
+                    threshold === option.value
+                      ? 'bg-blue-600 text-white shadow-lg'
+                      : 'bg-gray-700 text-gray-300 hover:bg-gray-600'
+                  }`}
+                >
+                  {option.label}
+                </button>
+              ))}
+            </div>
+          </div>
+
+          {/* Category Filter - Only for Polymarket */}
+          {platform === 'polymarket' && (
+            <div className="mb-4 pb-4 border-b border-gray-700">
+              <label className="text-gray-300 font-medium block mb-3">
+                市场类别：
               </label>
-              <div className="flex gap-2">
-                {thresholdOptions.map((option) => (
+              <div className="flex flex-wrap gap-2">
+                {POPULAR_CATEGORIES.map((category) => (
+                  <button
+                    key={category}
+                    onClick={() => setSelectedCategory(category)}
+                    className={`px-4 py-2 rounded-lg font-medium transition-all ${
+                      selectedCategory === category
+                        ? 'bg-purple-600 text-white shadow-lg'
+                        : 'bg-gray-700 text-gray-300 hover:bg-gray-600'
+                    }`}
+                  >
+                    {category}
+                  </button>
+                ))}
+              </div>
+            </div>
+          )}
+
+          {/* Time Range Filter - Only for Polymarket */}
+          {platform === 'polymarket' && (
+            <div className="mb-4 pb-4 border-b border-gray-700">
+              <label className="text-gray-300 font-medium block mb-3">
+                时间范围：
+              </label>
+              <div className="flex flex-wrap gap-2">
+                {timeRangeOptions.map((option) => (
                   <button
                     key={option.value}
-                    onClick={() => setThreshold(option.value)}
+                    onClick={() => setSelectedTimeRange(option.value)}
                     className={`px-4 py-2 rounded-lg font-medium transition-all ${
-                      threshold === option.value
-                        ? 'bg-blue-600 text-white shadow-lg'
+                      selectedTimeRange === option.value
+                        ? 'bg-green-600 text-white shadow-lg'
                         : 'bg-gray-700 text-gray-300 hover:bg-gray-600'
                     }`}
                   >
@@ -149,7 +364,10 @@ export default function Home() {
                 ))}
               </div>
             </div>
+          )}
 
+          {/* Status Info */}
+          <div className="flex flex-wrap items-center justify-between gap-4">
             <div className="flex items-center gap-4">
               <div className="flex items-center gap-2 text-gray-400">
                 <div
@@ -158,7 +376,7 @@ export default function Home() {
                   }`}
                 />
                 <span className="text-sm">
-                  {loading ? 'Fetching...' : 'Live'}
+                  {loading ? '获取中...' : '实时'}
                 </span>
               </div>
               <div className="flex items-center gap-2 text-gray-400 border-l border-gray-600 pl-4">
@@ -176,7 +394,7 @@ export default function Home() {
                   />
                 </svg>
                 <span className="text-sm font-medium">
-                  Next refresh: {countdown}s
+                  下次刷新: {countdown}秒
                 </span>
               </div>
             </div>
@@ -186,26 +404,31 @@ export default function Home() {
         {/* Stats */}
         <div className="grid grid-cols-1 md:grid-cols-3 gap-4 mb-6">
           <div className="bg-gray-800 rounded-lg shadow-xl p-6">
-            <div className="text-gray-400 text-sm mb-1">Total Whale Trades</div>
-            <div className="text-3xl font-bold text-white">{accumulatedTrades.length}</div>
+            <div className="text-gray-400 text-sm mb-1">
+              {selectedCategory !== 'All' || selectedTimeRange !== 'all' ? '筛选后的' : '总计'} 巨鲸交易
+            </div>
+            <div className="text-3xl font-bold text-white">{filteredTrades.length}</div>
+            {(selectedCategory !== 'All' || selectedTimeRange !== 'all') && (
+              <div className="text-gray-500 text-xs mt-1">共 {accumulatedTrades.length} 笔</div>
+            )}
           </div>
           <div className="bg-gray-800 rounded-lg shadow-xl p-6">
-            <div className="text-gray-400 text-sm mb-1">Total Volume</div>
+            <div className="text-gray-400 text-sm mb-1">总交易量</div>
             <div className="text-3xl font-bold text-green-400">
               $
-              {accumulatedTrades
+              {filteredTrades
                 .reduce((sum, trade) => sum + trade.amount, 0)
                 .toLocaleString('en-US', { maximumFractionDigits: 0 })}
             </div>
           </div>
           <div className="bg-gray-800 rounded-lg shadow-xl p-6">
-            <div className="text-gray-400 text-sm mb-1">Average Trade</div>
+            <div className="text-gray-400 text-sm mb-1">平均交易额</div>
             <div className="text-3xl font-bold text-blue-400">
               $
-              {accumulatedTrades.length > 0
+              {filteredTrades.length > 0
                 ? (
-                    accumulatedTrades.reduce((sum, trade) => sum + trade.amount, 0) /
-                    accumulatedTrades.length
+                    filteredTrades.reduce((sum, trade) => sum + trade.amount, 0) /
+                    filteredTrades.length
                   ).toLocaleString('en-US', { maximumFractionDigits: 0 })
                 : '0'}
             </div>
@@ -215,8 +438,15 @@ export default function Home() {
         {/* Error Display */}
         {error && (
           <div className="bg-red-900 border border-red-700 text-red-200 rounded-lg p-4 mb-6">
-            <p className="font-medium">Error loading trades:</p>
-            <p className="text-sm">{error.message || 'Unknown error occurred'}</p>
+            <p className="font-medium">加载交易数据时出错：</p>
+            <p className="text-sm">{error.message || '发生未知错误'}</p>
+          </div>
+        )}
+
+        {/* Market Sentiment Section - Only for Polymarket */}
+        {platform === 'polymarket' && filteredTrades.length > 0 && (
+          <div className="mb-6">
+            <MarketSentiment trades={filteredTrades} timeRange={selectedTimeRange as '1h' | '24h' | '7d' | 'all'} />
           </div>
         )}
 
@@ -224,10 +454,13 @@ export default function Home() {
         <div className="bg-gray-800 rounded-lg shadow-xl overflow-hidden">
           <div className="px-6 py-4 border-b border-gray-700 flex items-center justify-between">
             <h2 className="text-xl font-bold text-white">
-              Whale Trades History
+              巨鲸交易历史
             </h2>
             <div className="text-sm text-gray-400">
-              Showing {startIndex + 1}-{Math.min(endIndex, accumulatedTrades.length)} of {accumulatedTrades.length} trades
+              显示 {filteredTrades.length > 0 ? startIndex + 1 : 0}-{Math.min(endIndex, filteredTrades.length)} / 共 {filteredTrades.length} 笔交易
+              {(selectedCategory !== 'All' || selectedTimeRange !== 'all') && (
+                <span className="text-gray-500"> (从 {accumulatedTrades.length} 笔中筛选)</span>
+              )}
             </div>
           </div>
           <TradeTable trades={currentTrades} loading={loading && accumulatedTrades.length === 0} />
@@ -244,7 +477,7 @@ export default function Home() {
                     : 'bg-blue-600 text-white hover:bg-blue-700'
                 }`}
               >
-                Previous
+                上一页
               </button>
 
               <div className="flex items-center gap-2">
@@ -297,7 +530,7 @@ export default function Home() {
                     : 'bg-blue-600 text-white hover:bg-blue-700'
                 }`}
               >
-                Next
+                下一页
               </button>
             </div>
           )}
@@ -322,7 +555,7 @@ export default function Home() {
               <span className="text-sm font-medium">使用说明</span>
             </a>
             <a
-              href="https://github.com/yourusername/polywhale"
+              href="https://github.com/duolaAmengweb3/polywhale"
               target="_blank"
               rel="noopener noreferrer"
               className="flex items-center gap-2 text-gray-400 hover:text-white transition-colors"
@@ -338,10 +571,10 @@ export default function Home() {
           {/* Footer Info */}
           <div className="text-center text-gray-500 text-sm">
             <p>
-              Data from Polymarket public API • Updates every 30 seconds • Not financial advice
+              数据来自 {platform === 'polymarket' ? 'Polymarket' : 'Kalshi'} 公开 API • 每30秒自动更新 • 不构成投资建议
             </p>
             <p className="mt-2">
-              Built with Next.js, TypeScript, and Tailwind CSS
+              使用 Next.js, TypeScript 和 Tailwind CSS 构建
             </p>
           </div>
         </div>
